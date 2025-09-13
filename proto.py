@@ -6,14 +6,31 @@ WIDTH, HEIGHT = 600, 1024         # fenêtre en mode portrait (écran 10")
 RADIUS = 16                        # rayon de la bille (px)
 GRAVITY = 1000.0                   # intensité de la gravité (px/s^2)
 SLOPE_DEG = 0.0                    # pente (degrés) : 0 = vertical ; >0 = penche vers la droite
-REST_E = 0.75                      # coefficient de restitution (rebond) : 1.0 = rebond parfait ; 0.7–0.85 "réaliste"
-AIR_DRAG = 0.999                   # frottement "air" par tick (1.0 = aucun)
+REST_E = 0.78                      # coefficient de restitution (rebond)
+AIR_DRAG = 0.998                   # frottement "air" par tick (1.0 = aucun)
 GROUND_FRICTION = 0.96             # perte d'énergie horizontale au contact du sol
-SUBSTEPS = 3                       # sous-étapes de physique par frame (évite de "traverser" le sol)
+SUBSTEPS = 6                       # sous-étapes de physique par frame (évite le "tunneling")
+
+# Paramètres des flippers
+FLIPPER_LENGTH = 100
+FLIPPER_WIDTH  = 20
+FLIPPER_REST_ANGLE   = 45    # angle de repos (degrés, sens trigonométrique)
+FLIPPER_ACTIVE_ANGLE = -20   # angle actif (vers le haut)
+FLIPPER_SPEED = 18           # vitesse de rotation (degrés par frame) – utilisé pour easing
+FLIPPER_IMPULSE_SCALE = 1.0  # modulateur global d'impulsion
+
+# Paramètres du cadre de jeu
+BORDER_WIDTH = 30  # Largeur des bords du cadre
+GAP_WIDTH = 150    # Largeur du trou central entre les flippers
+
+# Position et taille du trou entre les flippers
+gap_x1 = WIDTH // 2 - GAP_WIDTH // 2
+gap_x2 = WIDTH // 2 + GAP_WIDTH // 2
+gap_y  = HEIGHT - 10  # Position verticale du trou
 
 pygame.init()
 screen = pygame.display.set_mode((WIDTH, HEIGHT))
-pygame.display.set_caption("Prototype Physique Pinball")
+pygame.display.set_caption("Prototype Physique Pinball – fix collisions")
 
 clock = pygame.time.Clock()
 font = pygame.font.SysFont(None, 20)
@@ -22,68 +39,243 @@ font = pygame.font.SysFont(None, 20)
 x, y = WIDTH // 2, RADIUS + 10     # position initiale (en px)
 vx, vy = 0.0, 0.0                  # vitesse initiale (px/s)
 
+# --- Flipper ---
+class Flipper:
+    def __init__(self, x, y, side='left'):
+        self.x = float(x)
+        self.y = float(y)
+        self.side = side
+
+        # Miroir correct pour le flipper droit : θ' = 180° − θ
+        if side == 'right':
+            rest_deg   = 180 - FLIPPER_REST_ANGLE
+            active_deg = 180 - FLIPPER_ACTIVE_ANGLE
+        else:
+            rest_deg   = FLIPPER_REST_ANGLE
+            active_deg = FLIPPER_ACTIVE_ANGLE
+
+        self.rest_angle   = math.radians(rest_deg)
+        self.active_angle = math.radians(active_deg)
+
+        self.angle        = self.rest_angle
+        self.target_angle = self.rest_angle
+        self.prev_angle   = self.angle    # <-- nécessaire pour la vitesse angulaire
+        self.length = float(FLIPPER_LENGTH)
+        self.width  = float(FLIPPER_WIDTH)
+        self.active = False
+
+    def update(self):
+        # mémorise l'angle précédent pour calculer ω ensuite
+        self.prev_angle = self.angle
+        # poursuite vers la cible avec vitesse bornée (plus stable que un simple *0.3)
+        diff = self.target_angle - self.angle
+        max_step = math.radians(FLIPPER_SPEED)  # degrés/frame -> rad/frame
+        step = max(-max_step, min(max_step, diff))
+        self.angle += step
+
+    def activate(self):
+        self.target_angle = self.active_angle
+        self.active = True
+
+    def deactivate(self):
+        self.target_angle = self.rest_angle
+        self.active = False
+
+    def get_end_point(self):
+        end_x = self.x + math.cos(self.angle) * self.length
+        end_y = self.y + math.sin(self.angle) * self.length
+        return end_x, end_y
+
+    def draw(self, surface):
+        end_x, end_y = self.get_end_point()
+        pygame.draw.line(surface, (255, 255, 255), (self.x, self.y), (end_x, end_y), int(self.width))
+        pygame.draw.circle(surface, (200, 200, 200), (int(self.x), int(self.y)), int(self.width//2))
+
+    def point_velocity(self, px, py, dt):
+        """
+        Vitesse du point (px,py) dûe à la rotation du flipper : v = ω × r.
+        ω ≈ (angle - prev_angle) / dt (rad/s), r = (px - pivot, py - pivot)
+        """
+        if dt <= 0:
+            return 0.0, 0.0
+        w = (self.angle - self.prev_angle) / dt  # rad/s
+        rx, ry = px - self.x, py - self.y
+        # En 2D : ω × r = (-ω*ry, ω*rx)
+        return (-w * ry, w * rx)
+
+
+# Créarrtion des flippers
+flipper_left  = Flipper(WIDTH//3,     HEIGHT - 100, 'left')
+flipper_right = Flipper(2*WIDTH//3,   HEIGHT - 100, 'right')
+
+
 def gravity_vector(angle_deg: float, g: float):
-    """
-    Gravité orientée selon la pente.
-    Convention : angle mesuré depuis la verticale vers la droite.
-      - 0°  -> gravité purement vers le bas
-      - 10° -> gravité "penchée" vers le bas + un peu vers la droite
+    """Gravité orientée selon la pente.
+    angle en degrés mesuré depuis la verticale vers la droite.
+    0° -> vertical; 10° -> bas + un peu droite.
     """
     a = math.radians(angle_deg)
-    gx = g * math.sin(a)   # composante horizontale
-    gy = g * math.cos(a)   # composante verticale
+    gx = g * math.sin(a)
+    gy = g * math.cos(a)
     return gx, gy
 
-def step_physics(dt: float):
-    global x, y, vx, vy
 
-    # 1) Accélération due à la gravité (orientée par la pente)
+def check_wall_and_hole(ball_x, ball_y):
+    """Retourne (fell_in_hole, new_x, new_y, new_vx, new_vy)."""
+    global vx, vy
+    # trou
+    if ball_y > gap_y and gap_x1 < ball_x < gap_x2:
+        return True, ball_x, ball_y, vx, vy
+
+    # murs latéraux
+    if ball_x < RADIUS + BORDER_WIDTH:
+        ball_x = RADIUS + BORDER_WIDTH
+        vx = -vx * REST_E
+    elif ball_x > WIDTH - RADIUS - BORDER_WIDTH:
+        ball_x = WIDTH - RADIUS - BORDER_WIDTH
+        vx = -vx * REST_E
+
+    # plafond
+    if ball_y < RADIUS + BORDER_WIDTH:
+        ball_y = RADIUS + BORDER_WIDTH
+        vy = -vy * REST_E
+
+    # sol (hors trou)
+    if ball_y > HEIGHT - RADIUS - BORDER_WIDTH and (ball_x <= gap_x1 or ball_x >= gap_x2):
+        ball_y = HEIGHT - RADIUS - BORDER_WIDTH
+        vy = -vy * REST_E
+        vx *= GROUND_FRICTION
+
+    return False, ball_x, ball_y, vx, vy
+
+
+def resolve_flipper_collision(ball_x, ball_y, ball_vx, ball_vy, flipper, dt):
+    """Collision capsule (segment+rayon) / disque, avec réflexion du vecteur vitesse.
+    Retourne (x,y,vx,vy,hit)
+    """
+    fx, fy = flipper.x, flipper.y
+    ex, ey = flipper.get_end_point()
+    dx, dy = ex - fx, ey - fy
+    seg_len = math.hypot(dx, dy)
+    if seg_len <= 1e-6:
+        return ball_x, ball_y, ball_vx, ball_vy, False
+
+    ux, uy = dx/seg_len, dy/seg_len  # direction du segment
+
+    # projection du centre de la bille sur le segment
+    bx, by = ball_x - fx, ball_y - fy
+    t = bx*ux + by*uy
+    t_clamped = max(0.0, min(seg_len, t))
+    closest_x = fx + ux * t_clamped
+    closest_y = fy + uy * t_clamped
+
+    # test pénétration avec rayon élargi (capsule)
+    rx = ball_x - closest_x
+    ry = ball_y - closest_y
+    dist = math.hypot(rx, ry)
+    min_dist = RADIUS + flipper.width*0.5
+
+    if dist >= min_dist:
+        return ball_x, ball_y, ball_vx, ball_vy, False
+
+    # normale sortante (du flipper vers la bille); si dist quasi nul, prend une normale au segment
+    if dist > 1e-6:
+        nx, ny = rx/dist, ry/dist
+    else:
+        nx, ny = -uy, ux  # perpendiculaire arbitraire
+
+    # pousse la bille hors de la capsule (position corrective)
+    penetration = (min_dist - dist)
+    ball_x += nx * penetration
+    ball_y += ny * penetration
+
+    # vitesse du point de contact lié au flipper (flipper "actif" bouge)
+    contact_x = closest_x
+    contact_y = closest_y
+    pvx, pvy = flipper.point_velocity(contact_x, contact_y, dt)
+
+    # vitesse relative le long de la normale
+    rel_vx = ball_vx - pvx
+    rel_vy = ball_vy - pvy
+    rel_n  = rel_vx*nx + rel_vy*ny
+
+    # Si on s'éloigne déjà (rel_n>0), ne pas re‑réfléchir; sinon, réflexion + restitution
+    if rel_n < 0.0:
+        j = -(1.0 + REST_E) * rel_n  # quantité de changement sur la composante normale
+        ball_vx += j * nx
+        ball_vy += j * ny
+
+        # petit boost si flipper actif (impulsion additionnelle contrôlée)
+        if flipper.active:
+            ball_vx += nx * 120 * FLIPPER_IMPULSE_SCALE
+            ball_vy += ny *  90 * FLIPPER_IMPULSE_SCALE
+
+    return ball_x, ball_y, ball_vx, ball_vy, True
+
+
+def step_physics(dt: float):
+    global x, y, vx, vy, running
+
+    fell, _x, _y, _vx, _vy = check_wall_and_hole(x, y)
+    if fell:
+        print("Perdu ! La balle est tombée dans le trou.")
+        running = False
+        return
+
+    # 1) gravité
     gx, gy = gravity_vector(SLOPE_DEG, GRAVITY)
     vx += gx * dt
     vy += gy * dt
 
-    # 2) Intégration position
-    x += vx * dt
-    y += vy * dt
+    # 2) intégration
+    x_try = x + vx * dt
+    y_try = y + vy * dt
 
-    # 3) Collisions murs gauche/droit (pour garder la bille dans le cadre)
-    if x < RADIUS:
-        x = RADIUS
-        vx = -vx * REST_E
-    elif x > WIDTH - RADIUS:
-        x = WIDTH - RADIUS
-        vx = -vx * REST_E
+    # 3) collisions murs & trou
+    fell, x_try, y_try, vx, vy = check_wall_and_hole(x_try, y_try)
+    if fell:
+        print("Perdu ! La balle est tombée dans le trou.")
+        running = False
+        return
 
-    # 4) Collision sol (bas de l'écran)
-    floor = HEIGHT - RADIUS
-    if y > floor:
-        y = floor
-        vy = -vy * REST_E        # inversion + perte d'énergie
-        vx *= GROUND_FRICTION    # frottement au contact
-        # Option : "endormir" la bille si elle ne bouge presque plus
-        if abs(vy) < 20:
-            vy = 0
+    # 4) collisions flippers (ordre: gauche puis droit)
+    x_try, y_try, vx, vy, _ = resolve_flipper_collision(x_try, y_try, vx, vy, flipper_left,  dt)
+    x_try, y_try, vx, vy, _ = resolve_flipper_collision(x_try, y_try, vx, vy, flipper_right, dt)
 
-    # 5) Frottements "air"
+    # 5) affectation
+    x, y = x_try, y_try
+
+    # 6) frottements d'air
     vx *= AIR_DRAG
     vy *= AIR_DRAG
 
+
 running = True
 while running:
+    # --- Gestion des entrées clavier ---
+    keys = pygame.key.get_pressed()
+    if keys[pygame.K_LEFT]:
+        flipper_left.activate()
+    else:
+        flipper_left.deactivate()
+
+    if keys[pygame.K_RIGHT]:
+        flipper_right.activate()
+    else:
+        flipper_right.deactivate()
+
     # --- Boucle événements ---
     for event in pygame.event.get():
         if event.type == pygame.QUIT:
             running = False
-
-        # Raccourcis utiles pendant vos tests
         elif event.type == pygame.KEYDOWN:
             if event.key == pygame.K_r:  # reset
                 x, y = WIDTH // 2, RADIUS + 10
                 vx, vy = 0.0, 0.0
-            elif event.key == pygame.K_LEFT:
-                SLOPE_DEG -= 1
-            elif event.key == pygame.K_RIGHT:
-                SLOPE_DEG += 1
+
+    # Mise à jour des flippers (conserve prev_angle pour vitesse angulaire)
+    flipper_left.update()
+    flipper_right.update()
 
     # --- Physique (avec sous-étapes pour la stabilité) ---
     dt = clock.tick(60) / 1000.0
@@ -96,14 +288,39 @@ while running:
 
     # --- Rendu ---
     screen.fill((12, 12, 14))
-    # Ligne du "sol" pour repère visuel
-    pygame.draw.line(screen, (60, 60, 70), (0, HEIGHT - RADIUS), (WIDTH, HEIGHT - RADIUS), 2)
-    # La bille
-    pygame.draw.circle(screen, (220, 60, 60), (int(x), int(y)), RADIUS)
 
-    # Overlay d'infos (utile pendant le tuning)
-    info = f"Slope={SLOPE_DEG:.1f}°, v=({vx:.1f},{vy:.1f}) px/s, dt={dt*1000:.2f} ms"
-    screen.blit(font.render(info, True, (200, 200, 210)), (10, 10))
+    # cadre de jeu
+    border_color = (100, 100, 200)
+    # haut
+    pygame.draw.rect(screen, border_color, (0, 0, WIDTH, BORDER_WIDTH))
+    # côtés
+    pygame.draw.rect(screen, border_color, (0, 0, BORDER_WIDTH, HEIGHT))
+    pygame.draw.rect(screen, border_color, (WIDTH - BORDER_WIDTH, 0, BORDER_WIDTH, HEIGHT))
+    # bas avec trou
+    pygame.draw.rect(screen, border_color, (0, HEIGHT - BORDER_WIDTH, gap_x1, BORDER_WIDTH))
+    pygame.draw.rect(screen, border_color, (gap_x2, HEIGHT - BORDER_WIDTH, WIDTH - gap_x2, BORDER_WIDTH))
+    pygame.draw.rect(screen, (0, 0, 0), (gap_x1, gap_y - 10, GAP_WIDTH, BORDER_WIDTH + 10))
+
+    # flippers
+    flipper_left.draw(screen)
+    flipper_right.draw(screen)
+
+    # bille
+    pygame.draw.circle(screen, (200, 50, 50), (int(x), int(y)), RADIUS)
+
+    # debug
+    debug_text = [
+        f"Position: ({x:.1f}, {y:.1f})",
+        f"Vitesse: ({vx:.1f}, {vy:.1f})",
+        f"Pente: {SLOPE_DEG}°",
+        "Contrôles:",
+        "- ← : flipper gauche",
+        "- → : flipper droit",
+        "- R : reset",
+    ]
+    for i, text in enumerate(debug_text):
+        surf = font.render(text, True, (200, 200, 200))
+        screen.blit(surf, (10, 10 + i * 20))
 
     pygame.display.flip()
 
