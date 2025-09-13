@@ -17,7 +17,7 @@ FLIPPER_WIDTH  = 20
 FLIPPER_REST_ANGLE   = 45    # angle de repos (degrés, sens trigonométrique)
 FLIPPER_ACTIVE_ANGLE = -20   # angle actif (vers le haut)
 FLIPPER_SPEED = 18           # vitesse de rotation (degrés par frame) – utilisé pour easing
-FLIPPER_IMPULSE_SCALE = 1.0  # modulateur global d'impulsion
+FLIPPER_IMPULSE_SCALE = 0.8  # modulateur global d'impulsion
 
 # Paramètres du cadre de jeu
 BORDER_WIDTH = 30  # Largeur des bords du cadre
@@ -30,7 +30,7 @@ gap_y  = HEIGHT - 10  # Position verticale du trou
 
 pygame.init()
 screen = pygame.display.set_mode((WIDTH, HEIGHT))
-pygame.display.set_caption("Prototype Physique Pinball – fix collisions")
+pygame.display.set_caption("Prototype Physique Pinball")
 
 clock = pygame.time.Clock()
 font = pygame.font.SysFont(None, 20)
@@ -46,7 +46,6 @@ class Flipper:
         self.y = float(y)
         self.side = side
 
-        # Miroir correct pour le flipper droit : θ' = 180° − θ
         if side == 'right':
             rest_deg   = 180 - FLIPPER_REST_ANGLE
             active_deg = 180 - FLIPPER_ACTIVE_ANGLE
@@ -105,8 +104,8 @@ class Flipper:
 
 
 # Créarrtion des flippers
-flipper_left  = Flipper(WIDTH//3,     HEIGHT - 100, 'left')
-flipper_right = Flipper(2*WIDTH//3,   HEIGHT - 100, 'right')
+flipper_left  = Flipper(WIDTH//3,     HEIGHT - 50, 'left')
+flipper_right = Flipper(2*WIDTH//3,   HEIGHT - 50, 'right')
 
 
 def gravity_vector(angle_deg: float, g: float):
@@ -131,7 +130,7 @@ def check_wall_and_hole(ball_x, ball_y):
     if ball_x < RADIUS + BORDER_WIDTH:
         ball_x = RADIUS + BORDER_WIDTH
         vx = -vx * REST_E
-    elif ball_x > WIDTH - RADIUS - BORDER_WIDTH:
+    elif ball_x > WIDTH - RADIUS - BORDER_WIDTH :
         ball_x = WIDTH - RADIUS - BORDER_WIDTH
         vx = -vx * REST_E
 
@@ -141,8 +140,8 @@ def check_wall_and_hole(ball_x, ball_y):
         vy = -vy * REST_E
 
     # sol (hors trou)
-    if ball_y > HEIGHT - RADIUS - BORDER_WIDTH and (ball_x <= gap_x1 or ball_x >= gap_x2):
-        ball_y = HEIGHT - RADIUS - BORDER_WIDTH
+    if ball_y > HEIGHT - RADIUS - BORDER_WIDTH -20 and (ball_x <= gap_x1 or ball_x >= gap_x2):
+        ball_y = HEIGHT - RADIUS - BORDER_WIDTH -20
         vy = -vy * REST_E
         vx *= GROUND_FRICTION
 
@@ -216,11 +215,11 @@ def resolve_flipper_collision(ball_x, ball_y, ball_vx, ball_vy, flipper, dt):
 def step_physics(dt: float):
     global x, y, vx, vy, running
 
+
     fell, _x, _y, _vx, _vy = check_wall_and_hole(x, y)
     if fell:
-        print("Perdu ! La balle est tombée dans le trou.")
-        running = False
-        return
+        x, y = WIDTH // 2, RADIUS + 10
+        vx, vy = 0.0, 0.0
 
     # 1) gravité
     gx, gy = gravity_vector(SLOPE_DEG, GRAVITY)
@@ -233,10 +232,6 @@ def step_physics(dt: float):
 
     # 3) collisions murs & trou
     fell, x_try, y_try, vx, vy = check_wall_and_hole(x_try, y_try)
-    if fell:
-        print("Perdu ! La balle est tombée dans le trou.")
-        running = False
-        return
 
     # 4) collisions flippers (ordre: gauche puis droit)
     x_try, y_try, vx, vy, _ = resolve_flipper_collision(x_try, y_try, vx, vy, flipper_left,  dt)
@@ -297,8 +292,8 @@ while running:
     pygame.draw.rect(screen, border_color, (0, 0, BORDER_WIDTH, HEIGHT))
     pygame.draw.rect(screen, border_color, (WIDTH - BORDER_WIDTH, 0, BORDER_WIDTH, HEIGHT))
     # bas avec trou
-    pygame.draw.rect(screen, border_color, (0, HEIGHT - BORDER_WIDTH, gap_x1, BORDER_WIDTH))
-    pygame.draw.rect(screen, border_color, (gap_x2, HEIGHT - BORDER_WIDTH, WIDTH - gap_x2, BORDER_WIDTH))
+    pygame.draw.rect(screen, border_color, (0, HEIGHT - BORDER_WIDTH - 20, gap_x1, BORDER_WIDTH))
+    pygame.draw.rect(screen, border_color, (gap_x2, HEIGHT - BORDER_WIDTH - 20, WIDTH - gap_x2, BORDER_WIDTH))
     pygame.draw.rect(screen, (0, 0, 0), (gap_x1, gap_y - 10, GAP_WIDTH, BORDER_WIDTH + 10))
 
     # flippers
